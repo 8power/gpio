@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 )
 
 //By default, pins 14 and 15 boot to UART mode, so they are going to be ignored for now.
@@ -42,54 +41,6 @@ var (
 	bytesSet   = []byte{'1'}
 	bytesClear = []byte{'0'}
 )
-
-// watchEventCallbacks is a map of pins and their callbacks when
-// watching for interrupts
-var watchEventCallbacks map[int]*pin
-
-// epollFD is the FD for epoll
-var epollFD int
-
-func init() {
-	setupEpoll()
-	watchEventCallbacks = make(map[int]*pin)
-}
-
-// setupEpoll sets up epoll for use
-func setupEpoll() {
-	var err error
-	epollFD, err = syscall.EpollCreate1(0)
-	if err != nil {
-		fmt.Println("Unable to create epoll FD: ", err.Error())
-		os.Exit(1)
-	}
-
-	go func() {
-
-		var epollEvents [GPIOCount]syscall.EpollEvent
-
-		for {
-			numEvents, err := syscall.EpollWait(epollFD, epollEvents[:], -1)
-			if err != nil {
-				if err == syscall.EAGAIN {
-					continue
-				}
-				panic(fmt.Sprintf("EpollWait error: %v", err))
-			}
-			for i := 0; i < numEvents; i++ {
-				if eventPin, exists := watchEventCallbacks[int(epollEvents[i].Fd)]; exists {
-					if eventPin.initial {
-						eventPin.initial = false
-					} else {
-						eventPin.callback()
-					}
-				}
-			}
-		}
-
-	}()
-
-}
 
 // pin represents a GPIO pin.
 type pin struct {
@@ -193,62 +144,6 @@ func (p *pin) Get() bool {
 	bytes := make([]byte, 1)
 	_, p.err = p.valueFile.ReadAt(bytes, 0)
 	return bytes[0] == bytesSet[0]
-}
-
-// Watch waits for the edge level to be triggered and then calls the callback
-// Watch sets the pin mode to input on your behalf, then establishes the interrupt on
-// the edge provided
-
-func (p *pin) BeginWatch(edge Edge, callback IRQEvent) error {
-	p.SetMode(ModeInput)
-	if err := write([]byte(edge), p.edgePath); err != nil {
-		return err
-	}
-
-	var event syscall.EpollEvent
-	event.Events = syscall.EPOLLIN | (syscall.EPOLLET & 0xffffffff) | syscall.EPOLLPRI
-
-	fd := int(p.valueFile.Fd())
-
-	p.callback = callback
-	watchEventCallbacks[fd] = p
-
-	if err := syscall.SetNonblock(fd, true); err != nil {
-		return err
-	}
-
-	event.Fd = int32(fd)
-
-	if err := syscall.EpollCtl(epollFD, syscall.EPOLL_CTL_ADD, fd, &event); err != nil {
-		return err
-	}
-
-	return nil
-
-}
-
-// EndWatch stops watching the pin
-func (p *pin) EndWatch() error {
-
-	fd := int(p.valueFile.Fd())
-
-	if err := syscall.EpollCtl(epollFD, syscall.EPOLL_CTL_DEL, fd, nil); err != nil {
-		return err
-	}
-
-	if err := syscall.SetNonblock(fd, false); err != nil {
-		return err
-	}
-
-	delete(watchEventCallbacks, fd)
-
-	return nil
-
-}
-
-// Wait blocks while waits for the pin state to match the condition, then returns.
-func (p *pin) Wait(condition bool) {
-	panic("Wait is not yet implemented!")
 }
 
 // Err returns the last error encountered.
